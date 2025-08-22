@@ -154,13 +154,12 @@ class TestDataMapper(DataHandler):
                     min_deviation = deviation
                     assigned_func = ideal_func
 
-            if assigned_func:
-                results.append({
-                    'x': x,
-                    'y': y,
-                    'chosen_function': assigned_func,
-                    'deviation': min_deviation
-                })
+            results.append({
+                'x': x,
+                'y': y,
+                'chosen_function': assigned_func,
+                'deviation': min_deviation if assigned_func else None
+            })
 
         self._results_df = pd.DataFrame(results)
         try:
@@ -178,7 +177,8 @@ class TestDataMapper(DataHandler):
 class Visualizer:
     """Class for visualizing training, test, and ideal function data."""
     
-    def __init__(self, train_df: pd.DataFrame, test_df: pd.DataFrame, ideal_df: pd.DataFrame, best_functions: dict):
+    def __init__(self, train_df: pd.DataFrame, test_df: pd.DataFrame, ideal_df: pd.DataFrame, 
+                 best_functions: dict, results_df: pd.DataFrame):
         """
         Initialize the Visualizer.
 
@@ -187,28 +187,48 @@ class Visualizer:
             test_df (pd.DataFrame): Test data.
             ideal_df (pd.DataFrame): Ideal functions data.
             best_functions (dict): Mapping of training columns to ideal functions.
+            results_df (pd.DataFrame): Test data mapping results.
         """
         self._train_df = train_df
         self._test_df = test_df
         self._ideal_df = ideal_df
         self._best_functions = best_functions
+        self._results_df = results_df
 
     def visualize(self, output_file: str = 'visualization.png') -> None:
         """
-        Create and save a plot of training, test, and ideal function data.
+        Create and save a plot of training, test, and ideal function data with colored test points.
 
         Args:
             output_file (str): Path to save the visualization.
         """
         plt.figure(figsize=(12, 8))
+        
+        # Plot training data
         for y_col in ['y1', 'y2', 'y3', 'y4']:
             plt.plot(self._train_df['x'], self._train_df[y_col], label=f'Training {y_col}', linestyle='--')
+        
+        # Plot ideal functions
+        colors = {'y41': 'blue', 'y42': 'green', 'y11': 'orange', 'y48': 'purple'}
         for y_col, ideal_func in self._best_functions.items():
-            plt.plot(self._ideal_df['x'], self._ideal_df[ideal_func], label=f'Ideal {ideal_func}', alpha=0.7)
-        plt.scatter(self._test_df['x'], self._test_df['y'], color='red', label='Test Data', zorder=5)
+            plt.plot(self._ideal_df['x'], self._ideal_df[ideal_func], label=f'Ideal {ideal_func}', 
+                     color=colors.get(ideal_func, 'black'), alpha=0.7)
+
+        # Plot assigned test points
+        for func in self._results_df['chosen_function'].dropna().unique():
+            subset = self._results_df[self._results_df['chosen_function'] == func]
+            plt.scatter(subset['x'], subset['y'], label=f'Test Data ({func})', 
+                       color=colors.get(func, 'red'), s=50, zorder=5)
+
+        # Plot unassigned test points
+        unassigned = self._results_df[self._results_df['chosen_function'].isna()]
+        if not unassigned.empty:
+            plt.scatter(unassigned['x'], unassigned['y'], label='Test Data (Unassigned)', 
+                       color='red', s=50, marker='x', zorder=5)
+
         plt.xlabel('x')
         plt.ylabel('y')
-        plt.title('Training Data, Test Data, and Selected Ideal Functions')
+        plt.title('Training Data, Test Data and Selected Ideal Functions')
         plt.legend()
         plt.grid(True)
         plt.savefig(output_file)
@@ -251,8 +271,9 @@ class UnitTestRunner(unittest.TestCase):
     def test_function_assignment(self):
         """Test if test data points are assigned correctly."""
         results_df = self._test_data_mapper.get_results()
-        self.assertTrue(len(results_df) > 0, "No test points were assigned")
-        self.assertTrue(all(results_df['deviation'] >= 0), "Deviations should not be negative")
+        self.assertTrue(len(results_df) > 0, "No test points were processed")
+        assigned_df = results_df[results_df['chosen_function'].notna()]
+        self.assertTrue(all(assigned_df['deviation'] >= 0), "Deviations should not be negative")
 
 
 def main():
@@ -277,6 +298,13 @@ def main():
     test_data_mapper._engine = data_handler.get_engine()
     results_df = test_data_mapper.map_test_data()
 
+    # Analyze test data mappings
+    print("\nTest Points per Ideal Function:")
+    assigned_counts = results_df['chosen_function'].value_counts(dropna=True)
+    print(assigned_counts)
+    unassigned_count = results_df['chosen_function'].isna().sum()
+    print(f"Unassigned Test Points: {unassigned_count}")
+
     # Print database contents
     with data_handler.get_engine().connect() as conn:
         print("\nTraining Data (first 5 rows):")
@@ -288,7 +316,7 @@ def main():
 
     # Visualize data
     visualizer = Visualizer(data_handler.get_train_data(), data_handler.get_test_data(),
-                           data_handler.get_ideal_data(), best_functions)
+                           data_handler.get_ideal_data(), best_functions, results_df)
     visualizer.visualize()
 
     # Run unit tests
