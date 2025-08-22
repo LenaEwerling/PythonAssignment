@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import unittest
 import math
 
+class DatabaseSaveError(Exception):
+    pass
 
 class DataHandler:
     """Base class for handling data loading and database operations."""
@@ -34,8 +36,7 @@ class DataHandler:
             self._test_df = pd.read_csv(test_file)
             self._ideal_df = pd.read_csv(ideal_file)
         except FileNotFoundError as e:
-            print(f"Error: File not found - {e}")
-            raise
+            raise FileNotFoundError(f"Error: File not found - {e}")
 
     def save_to_database(self) -> None:
         """
@@ -47,9 +48,8 @@ class DataHandler:
         try:
             self._train_df.to_sql('training_data', self._engine, if_exists='replace', index=False)
             self._ideal_df.to_sql('ideal_functions', self._engine, if_exists='replace', index=False)
-        except Exception as e:
-            print(f"Error saving to database: {e}")
-            raise
+        except DatabaseSaveError as e:
+            raise DatabaseSaveError(f"Error saving to database: {e}")
 
     def get_train_data(self) -> pd.DataFrame:
         """Get the training DataFrame."""
@@ -137,36 +137,41 @@ class TestDataMapper(DataHandler):
         """
         results = []
         sqrt_2 = math.sqrt(2)
+        # Reverse mapping to find training column for ideal function
+        reverse_best_functions = {v: k for k, v in self._best_functions.items()}
 
         for _, row in self._test_df.iterrows():
             x, y = row['x'], row['y']
-            assigned_func = None
+            best_func = None
             min_deviation = float('inf')
 
-            for y_col, ideal_func in self._best_functions.items():
+            for ideal_func in self._best_functions.values():
                 if x in self._ideal_df['x'].values:
                     ideal_y = self._ideal_df[self._ideal_df['x'] == x][ideal_func].values[0]
                 else:
                     ideal_y = np.interp(x, self._ideal_df['x'], self._ideal_df[ideal_func])
                 deviation = abs(y - ideal_y)
-                max_allowed_deviation = self._max_deviations[y_col] * sqrt_2
-                if deviation <= max_allowed_deviation and deviation < min_deviation:
+                if deviation < min_deviation:
                     min_deviation = deviation
-                    assigned_func = ideal_func
+                    best_func = ideal_func
+
+            # Get the corresponding training column for the best function
+            train_col = reverse_best_functions[best_func]
+            max_allowed_deviation = self._max_deviations[train_col] * sqrt_2
+            chosen_function = best_func if min_deviation <= max_allowed_deviation else f'({best_func})'
 
             results.append({
                 'x': x,
                 'y': y,
-                'chosen_function': assigned_func,
-                'deviation': min_deviation if assigned_func else None
+                'chosen_function': chosen_function,
+                'deviation': min_deviation
             })
 
         self._results_df = pd.DataFrame(results)
         try:
             self._results_df.to_sql('test_results', self._engine, if_exists='replace', index=False)
-        except Exception as e:
-            print(f"Error saving test results to database: {e}")
-            raise
+        except DatabaseSaveError as e:
+            raise DatabaseSaveError(f"Error saving test results to database: {e}")
         return self._results_df
 
     def get_results(self) -> pd.DataFrame:
@@ -214,22 +219,23 @@ class Visualizer:
             plt.plot(self._ideal_df['x'], self._ideal_df[ideal_func], label=f'Ideal {ideal_func}', 
                      color=colors.get(ideal_func, 'black'), alpha=0.7)
 
-        # Plot assigned test points
-        for func in self._results_df['chosen_function'].dropna().unique():
-            subset = self._results_df[self._results_df['chosen_function'] == func]
+        # Plot valid test points
+        valid_points = self._results_df[~self._results_df['chosen_function'].str.startswith('(')]
+        for func in valid_points['chosen_function'].unique():
+            subset = valid_points[valid_points['chosen_function'] == func]
             plt.scatter(subset['x'], subset['y'], label=f'Test Data ({func})', 
-                       color=colors.get(func, 'red'), s=50, zorder=5)
+                       color=colors.get(func, 'red'), s=50, marker='o', zorder=5)
 
-        # Plot unassigned test points
-        unassigned = self._results_df[self._results_df['chosen_function'].isna()]
-        if not unassigned.empty:
-            plt.scatter(unassigned['x'], unassigned['y'], label='Test Data (Unassigned)', 
+        # Plot all invalid test points together
+        invalid_points = self._results_df[self._results_df['chosen_function'].str.startswith('(')]
+        if not invalid_points.empty:
+            plt.scatter(invalid_points['x'], invalid_points['y'], label='Test Data (Invalid)', 
                        color='red', s=50, marker='x', zorder=5)
 
         plt.xlabel('x')
         plt.ylabel('y')
         plt.title('Training Data, Test Data and Selected Ideal Functions')
-        plt.legend()
+        plt.legend(loc='upper center')
         plt.grid(True)
         plt.savefig(output_file)
         plt.close()
@@ -272,8 +278,8 @@ class UnitTestRunner(unittest.TestCase):
         """Test if test data points are assigned correctly."""
         results_df = self._test_data_mapper.get_results()
         self.assertTrue(len(results_df) > 0, "No test points were processed")
-        assigned_df = results_df[results_df['chosen_function'].notna()]
-        self.assertTrue(all(assigned_df['deviation'] >= 0), "Deviations should not be negative")
+        valid_df = results_df[~results_df['chosen_function'].str.startswith('(')]
+        self.assertTrue(all(valid_df['deviation'] >= 0), "Deviations should not be negative for valid assignments")
 
 
 def main():
@@ -300,10 +306,7 @@ def main():
 
     # Analyze test data mappings
     print("\nTest Points per Ideal Function:")
-    assigned_counts = results_df['chosen_function'].value_counts(dropna=True)
-    print(assigned_counts)
-    unassigned_count = results_df['chosen_function'].isna().sum()
-    print(f"Unassigned Test Points: {unassigned_count}")
+    print(results_df['chosen_function'].value_counts())
 
     # Print database contents
     with data_handler.get_engine().connect() as conn:
